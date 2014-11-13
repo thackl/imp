@@ -25,7 +25,7 @@ use Sam::Alignment ':flags';
 ##---------------------------------------------------------------------------##
 # Globals
 
-our $VERSION = "0.1.0";
+our $VERSION = "0.1.1";
 
 our $ID = 'easy';
 
@@ -65,19 +65,20 @@ my %opt = (
            bwa_opt => [qw(-a -D0 -r1 -y10 -e -T 0 -W40 -L0,0)],
            dir => '.',
            out => $ID,
-           );
+          );
 
-GetOptions( # use %opt (Cfg) as defaults
+GetOptions(                     # use %opt (Cfg) as defaults
            \%opt, qw(
-                      dir=s
-                      out=s
-                      frg|fragments=s
-                      ref|reference=s
-                      samtools-path=s
-                      version|V!
-                      help|h!
-                      quiet!
-                      debug|D!
+                        dir=s
+                        out=s
+                        threads=i
+                        frg|fragments=s
+                        ref|reference=s
+                        samtools-path=s
+                        version|V!
+                        help|h!
+                        quiet!
+                        debug|D!
                    )
           ) or $L->logcroak('Failed to "GetOptions"');
 
@@ -87,8 +88,8 @@ $opt{dir} ||= '.';
 $opt{help} && pod2usage(1);
 
 # version
-if($opt{version}){
-    print "$VERSION\n"; 
+if ($opt{version}) {
+    print "$VERSION\n";
     exit 0;
 }
 
@@ -96,16 +97,19 @@ if($opt{version}){
 $opt{quiet} && $L->level($WARN);
 $opt{debug} && $L->level($DEBUG);
 
-for(qw(frg)){
-    if(ref $opt{$_} eq 'ARRAY'){
+for (qw(frg)) {
+    if (ref $opt{$_} eq 'ARRAY') {
 	pod2usage("required: --$_") unless @{$opt{$_}}
-    }else{
+    } else {
 	pod2usage("required: --$_") unless defined ($opt{$_})
     }
-};
+}
+;
+
+$L->info("Checking binaries");
 
 check_binary(bin('samtools'), ["--version", "1.1"]);
-check_binary(bin('blasr'));
+check_binary(bin('bwa'));
 
 ##----------------------------------------------------------------------------##
 # get overlaps
@@ -124,25 +128,26 @@ my %frg = read_frg($opt{frg});
 my %ref = read_frg($opt{ref}) if $opt{ref};
 
 # index chunk
-$L->debug("Indexing fragments");
+$L->info("Indexing fragments");
 my $bwa_index_cmd = $opt{bwa_path}."bwa index $frg $frg 2>$frg.idx.log";
 $L->debug($bwa_index_cmd);
 qx($bwa_index_cmd);
 $L->logdie("bwa failed: $?\n", do { local $/; local @ARGV = ("$frg.idx.log") ; <> }) if $?;
-    
+
 $sam_cmd = $opt{bwa_path}."bwa mem -e -t $opt{threads} @{$opt{bwa_opt}} $frg $frg 2>$frg.bwa.log";
-    
-$L->debug("Mapping fragments");
+
+$L->info("Constructing overlap graph");
+
 $L->debug($sam_cmd);
-open(my $sam_oh, "-|", $sam_cmd) or $L->logdie($!);                
-    
+open(my $sam_oh, "-|", $sam_cmd) or $L->logdie($!);
+
 # init input stream parser
 my $sp = Sam::Parser->new(fh => $sam_oh);
 
 my %l;
 my $G = Graph->new(
- 	undirected => 1,
-);
+                   undirected => 1,
+                  );
 
 # Store seq lengths
 while (my %h = $sp->next_header_line('SQ')) {
@@ -151,7 +156,7 @@ while (my %h = $sp->next_header_line('SQ')) {
 
 while (my $a = $sp->next_aln) {
     my ($rid,$qid) = ($a->rname, $a->qname);
-    # ignore self hit 
+    # ignore self hit
     next if $rid eq $qid;
 
     my($qprel, $qsufl) = (0,0);
@@ -169,50 +174,51 @@ while (my $a = $sp->next_aln) {
 
     # ignore contained and non-termianal
     next if ! ($q5 xor $q3);
-    
-    if($a->is(REVERSE_COMPLEMENT)){
+
+    if ($a->is(REVERSE_COMPLEMENT)) {
         #print "rc\n";
         ($q5,$q3) = ($q3,$q5)
     }
-    
+
     my $r = $rid.( $r5 ? "'5" : "'3" );
     my $q = $qid.( $q5 ? "'5" : "'3" );
 
     #print "$r $q \n",substr($a, 0,30),"\t";
-    
+
     my $inferior = 0;
 
     # add edge if better (score) than previous edges
-    foreach($q,$r){
-        if(my ($e) = $G->edges_at($_)){
+    foreach ($q,$r) {
+        if (my ($e) = $G->edges_at($_)) {
             my $score = $G->get_edge_attribute(@$e, "ovl")->{score};
-            if($score < scalar $a->opt('AS')){
+            if ($score < scalar $a->opt('AS')) {
                 $G->delete_vertices(@$e); # delete inferior ovl
-            }else{
+            } else {
                 $inferior++;
             }
         }
     }
 
-    if(! $inferior){
+    if (! $inferior) {
 
         my @ro;
-        if($r5){
+        if ($r5) {
             # extremely ugly
-            # TODO: make bwa return aln length or sufl length of ref as opt 
+            # TODO: make bwa return aln length or sufl length of ref as opt
             my $ovll;
             my $cigar = $a->cigar;
-            while($cigar =~ /(\d+)[MD]/g){
+            while ($cigar =~ /(\d+)[MD]/g) {
                 $ovll += $1;
-            };
-            
+            }
+            ;
+
             @ro = (-($l{$rid} - ($a->pos-1) - $ovll));
-        }else{
+        } else {
             @ro = (0, $a->pos-1);
         }
 
         my @qo = $r3 ? (-$qsufl) : (0, $qprel);
-        
+
         $G->set_edge_attribute($q, $r, "ovl",
                                {
                                 score => scalar $a->opt('AS'),
@@ -222,11 +228,11 @@ while (my $a = $sp->next_aln) {
                                 $r => \@ro,
                                });
     }
-    #print "$G\n";    
+    #print "$G\n";
 }
 
 # add internal frg edges
-foreach my $v ($G->vertices){
+foreach my $v ($G->vertices) {
     my $u = $v;
     $v = substr($u, 0, -1).(substr($u, -1) == 3 ? 5 : 3);
     $G->add_edges($u,$v);
@@ -235,10 +241,12 @@ foreach my $v ($G->vertices){
 #print Dumper($G);
 #print "$G\n";
 
+$L->info("Cleaning graph");
+
 # isolates (shouldn't happen)
 my @isolates = $G->isolated_vertices();
 print Dumper({isolates => \@isolates}) if @isolates;
-    
+
 # nodes degree>2 (shouldn't happen)
 
 # circles
@@ -246,31 +254,32 @@ my @cycle = $G->find_a_cycle;
 print Dumper({cycles => \@cycle}) if @cycle;
 
 my @ccs = $G->connected_components();
+$L->info("Synthesizing ".@ccs." backbone paths ");
 
-my %frg = read_frg($opt{frg});
-my %ref = read_frg($opt{ref}) if $opt{ref};
+my $pc = 0;
 
 # start from exterior nodes
-while($G->has_vertices){
-    my @p = $G->longest_path;
-    print STDERR "@p\n";
- 
-    last unless @p; # no more longest paths
-    
+while ($G->has_vertices) {
+    $pc++;                      # path counter
+    my @p = random_path($G);
+
+    last unless @p;             # no more longest paths
+
     my $id = substr($p[0], 0, -2);
     my $rc_pr = substr($p[0],-1) eq 3 ? 1 : 0;
     my $rc_po = 0;
-    
+
+    die "unknown $id\n", Dumper([keys %frg]) unless exists $frg{$id};
     my $ctg = $frg{$id};
     $ctg->reverse_complement if $rc_pr;
-    print STDERR $ctg->seq,"\n";
+    $L->debug($ctg->seq);
 
     my $off;
-    for (my $i=2; $i<@p; $i+=2){
+    for (my $i=2; $i<@p; $i+=2) {
         my $id = substr($p[$i], 0, -2);
         my $rc_r = substr($p[$i],-1) eq 3 ? 1 : 0;
 
-        my $ovl = $G->get_edge_attribute($p[$i-1], $p[$i], "ovl");        
+        my $ovl = $G->get_edge_attribute($p[$i-1], $p[$i], "ovl");
 
         my $rc_o = $ovl->{rc} ? 1 : 0;
         my $rc_q = $ovl->{$p[$i]."_rc"} ? 1 : 0;
@@ -339,7 +348,7 @@ sub extend_ctg{
     my ($ctg, $seq, $ovl) = @_;
     # my @o = @$ovl;
     # if($o[qName] eq $seq->id){ # ctg ~= target
-        
+
     # }elsif($o[tName] eq $seq->id){ # ctg ~= query
     #     my $off = $o[qLength] - $o[qEnd];
     #     $ctg.= $seq->substr_seq($o[tEnd]+$off);
@@ -357,9 +366,9 @@ sub extend_ctg{
 
 sub bin{
     my ($bin) = @_;
-    if(exists $opt{$bin."_path"}){
+    if (exists $opt{$bin."_path"}) {
         return $opt{$bin."_path"}."/".$bin;
-    }else{
+    } else {
         return $bin;
     }
 }
@@ -368,34 +377,34 @@ sub check_binary{
     my($bin, $ver) = (@_);
     my $fbin = $bin;
     unless(-e $fbin && -x $fbin){
-      if($fbin = which($bin)){
-        $L->logdie("Binary '$fbin' not executable") unless -e $fbin && -x $fbin;
-      }else{
-        $L->logdie("Binary '$bin' neither in PATH nor executable");
-      }
+        if ($fbin = which($bin)) {
+            $L->logdie("Binary '$fbin' not executable") unless -e $fbin && -x $fbin;
+        } else {
+            $L->logdie("Binary '$bin' neither in PATH nor executable");
+        }
     }
 
     $bin = basename($fbin);
 
     my $v;
-    if($ver){
+    if ($ver) {
         $L->logdie("ARRAY ref required") unless ref $ver eq "ARRAY";
-        
+
         my $vs = qx($fbin $ver->[0]);
-        if($? or ! $vs){
+        if ($? or ! $vs) {
             $L->logdie("Couldn't determine version of $bin, at least $ver->[1] required");
         }
-        
+
         ($v) = $vs =~ /(\S+?)\D*$/m;
-        
-        if(version->parse($v) < version->parse($ver->[1])){
+
+        if (version->parse($v) < version->parse($ver->[1])) {
             $L->logdie("Version $v of '$bin' < $v");
         }
-        
+
     }
-    
+
     $L->info(sprintf("  [ok] %-15s %s", $bin.($v ? "-$v" : ""), dirname($fbin)));
-    
+
 }
 
 
