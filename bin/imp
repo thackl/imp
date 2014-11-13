@@ -25,9 +25,9 @@ use Sam::Alignment ':flags';
 ##---------------------------------------------------------------------------##
 # Globals
 
-our $VERSION = "0.1.1";
+our $VERSION = "0.2.0";
 
-our $ID = 'easy';
+our $ID = 'imp';
 
 # get a logger
 my $L = Log::Log4perl::get_logger();
