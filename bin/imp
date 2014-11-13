@@ -230,7 +230,6 @@ while (my $a = $sp->next_aln) {
     }
 
     if (! $inferior) {
-
         my @ro;
         if ($r5) {
             # extremely ugly
@@ -261,6 +260,11 @@ while (my $a = $sp->next_aln) {
     #print "$G\n";
 }
 
+# isolates (shouldn't happen)
+my @isolates = $G->isolated_vertices();
+print Dumper({isolates => \@isolates}) if @isolates;
+die "isolates" if @isolates;
+
 # add internal frg edges
 foreach my $v ($G->vertices) {
     my $u = $v;
@@ -268,14 +272,11 @@ foreach my $v ($G->vertices) {
     $G->add_edges($u,$v);
 }
 
+$L->debug(Dumper($G->connected_components));
 #print Dumper($G);
 #print "$G\n";
 
 $L->info("Cleaning graph");
-
-# isolates (shouldn't happen)
-my @isolates = $G->isolated_vertices();
-print Dumper({isolates => \@isolates}) if @isolates;
 
 # nodes degree>2 (shouldn't happen)
 
@@ -288,7 +289,6 @@ while (my @cycle = $G->find_a_cycle) {
 
     $G->delete_edge(@e);
 }
-
 
 my @ccs = $G->connected_components();
 $L->info("Synthesizing ".@ccs." backbone paths ");
@@ -309,7 +309,7 @@ while ($G->has_vertices) {
     die "unknown $id\n", Dumper([keys %frg]) unless exists $frg{$id};
     my $ctg = $frg{$id};
     $ctg->reverse_complement if $rc_pr;
-    $L->debug($ctg->seq);
+    #$L->debug($ctg->seq);
 
     my $off;
     for (my $i=2; $i<@p; $i+=2) {
@@ -340,10 +340,10 @@ while ($G->has_vertices) {
         $rc_po = $rc_o;
 
         $off+= abs($_) for @$ohl;
-        $L->debug(" " x abs($off), $frg->seq);
+        #$L->debug(" " x abs($off), $frg->seq);
         my $suf = $frg->substr_seq($ohl);
 
-        $L->debug(" " x length($ctg->seq), $suf->seq);
+        #$L->debug(" " x length($ctg->seq), $suf->seq);
         $ctg .= $suf;
     }
 
@@ -497,3 +497,4 @@ sub read_frg{
     }
     return %frg;
 }
+
