@@ -11,6 +11,7 @@ use Log::Log4perl::Level;
 
 use File::Basename;
 use File::Which;
+use File::Temp 'tempdir';
 use FindBin '$RealBin';
 
 use Graph;
@@ -25,7 +26,7 @@ use Sam::Alignment ':flags';
 ##---------------------------------------------------------------------------##
 # Globals
 
-our $VERSION = "0.2.0";
+our $VERSION = "0.2.1";
 
 our $ID = 'imp';
 
@@ -45,14 +46,12 @@ Log::Log4perl->init( \(q(
 
 # binaries
 #  SeqFilter
-#  blasr
+#  bwa
 #  samtools
-#  (bwa)
 
 # read seqs
 # fastq to fasta
-# tmp files in /dev/shm/olc-tiny or fallback to /tmp
-# index with samtools
+# tmp files in /dev/shm/imp-XXXXX or fallback to /tmp
 
 ##----------------------------------------------------------------------------##
 # Options
@@ -61,10 +60,12 @@ my %opt = (
            samtools_path => '',
            bwa_path => $RealBin.'/../util/bwa/',
            threads => 1,
-           term_ignore_length => 4,
-           bwa_opt => [qw(-a -D0 -r1 -y10 -e -T 0 -W40 -L0,0)],
+           term_ignore_length => 20,
+           bwa_opt => [qw(-a -D0 -y10 -r 1 -e -T 70 -W40 -L0,0)],
+#           bwa_opt => [qw(-a -D0 -e -T 0 -W40 -L0,0)],
            dir => '.',
            out => $ID,
+           tmp => (-d '/dev/shm' ? '/dev/shm' : '/tmp'),
           );
 
 GetOptions(                     # use %opt (Cfg) as defaults
@@ -97,35 +98,47 @@ if ($opt{version}) {
 $opt{quiet} && $L->level($WARN);
 $opt{debug} && $L->level($DEBUG);
 
-for (qw(frg)) {
-    if (ref $opt{$_} eq 'ARRAY') {
-	pod2usage("required: --$_") unless @{$opt{$_}}
-    } else {
-	pod2usage("required: --$_") unless defined ($opt{$_})
-    }
-}
-;
-
 $L->info("Checking binaries");
 
 check_binary(bin('samtools'), ["--version", "1.1"]);
 check_binary(bin('bwa'));
 
+
 ##----------------------------------------------------------------------------##
-# get overlaps
+# tmp dir
 
-my $bout = "$opt{dir}/$opt{out}.sam";
-my $blog = "$opt{dir}/$opt{out}.log";
-my $frg = $opt{frg};
+my $tmp = tempdir(
+                  "imp-XXXXXX",
+                  DIR => $opt{tmp},
+                  UNLINK => 1,
+                  CLEANUP => 1
+                 );
 
-my $sam_cmd;
-
+##----------------------------------------------------------------------------##
 # load fragments
 #  early to check ids etc..
-$L->info("Loading fragments");
 
-my %frg = read_frg($opt{frg});
-my %ref = read_frg($opt{ref}) if $opt{ref};
+my $frg = "$tmp/frg.faq";
+unless($opt{frg}){
+    $L->info("Loading fragments from STDIN");
+    my $c;
+    open(FRG, '>', $frg) or die "$! $opt{frg}";
+    print FRG $c while read(STDIN, $c, 100000);
+    close FRG;
+}else{
+    $L->info("Loading fragments");
+    $opt{frg} = File::Spec->rel2abs($opt{frg});
+    qx(ln -s $opt{frg} $frg);
+}
+
+$L->logdie("Empty input") unless -s $frg;
+
+my %frg = read_frg($frg);
+
+
+##----------------------------------------------------------------------------##
+# get overlaps
+my $sam_cmd;
 
 # index chunk
 $L->info("Indexing fragments");
@@ -136,7 +149,7 @@ $L->logdie("bwa failed: $?\n", do { local $/; local @ARGV = ("$frg.idx.log") ; <
 
 $sam_cmd = $opt{bwa_path}."bwa mem -e -t $opt{threads} @{$opt{bwa_opt}} $frg $frg 2>$frg.bwa.log";
 
-$L->info("Constructing overlap graph");
+$L->info("Constructing graph");
 
 $L->debug($sam_cmd);
 open(my $sam_oh, "-|", $sam_cmd) or $L->logdie($!);
