@@ -24,7 +24,7 @@ use Sam::Alignment ':flags';
 ##---------------------------------------------------------------------------##
 # Globals
 
-our $VERSION = "0.0.0";
+our $VERSION = "0.1.0";
 
 our $ID = 'easy';
 
@@ -71,6 +71,7 @@ GetOptions( # use %opt (Cfg) as defaults
                       dir=s
                       out=s
                       frg|fragments=s
+                      ref|reference=s
                       samtools-path=s
                       version|V!
                       help|h!
@@ -208,6 +209,7 @@ while (my $a = $sp->next_aln) {
                                {
                                 score => scalar $a->opt('AS'),
                                 rc => $a->is(REVERSE_COMPLEMENT),
+                                $q."_rc" => $a->is(REVERSE_COMPLEMENT),
                                 $q => \@qo,
                                 $r => \@ro,
                                });
@@ -238,6 +240,7 @@ print Dumper({cycles => \@cycle}) if @cycle;
 my @ccs = $G->connected_components();
 
 my %frg = read_frg($opt{frg});
+my %ref = read_frg($opt{ref}) if $opt{ref};
 
 # start from exterior nodes
 while($G->has_vertices){
@@ -247,31 +250,70 @@ while($G->has_vertices){
     last unless @p; # no more longest paths
     
     my $id = substr($p[0], 0, -2);
-    my $rc = $p[0] lt $p[1];
-
-    my $ctg = $frg{$id};
-    $ctg->reverse_complement if $rc;
+    my $rc_pr = substr($p[0],-1) eq 3 ? 1 : 0;
+    my $rc_po = 0;
     
+    my $ctg = $frg{$id};
+    $ctg->reverse_complement if $rc_pr;
+    print STDERR $ctg->seq,"\n";
+
+    my $off;
     for (my $i=2; $i<@p; $i+=2){
         my $id = substr($p[$i], 0, -2);
-        my $rc_r = substr($p[0],-1) eq 3 ? 1 : 0;
+        my $rc_r = substr($p[$i],-1) eq 3 ? 1 : 0;
 
         my $ovl = $G->get_edge_attribute($p[$i-1], $p[$i], "ovl");        
-        my $o = $ovl->{$p[$i]};
-        my $rc_q = $ovl->{$p[$i]."_rc"} || 0;
-        $rc = ($rc_r xor $rc_q) ? 1 : 0;
-        #$rc = $rc_r;
-        print STDERR "$rc $rc_r $rc_q\n"; 
+
+        my $rc_o = $ovl->{rc} ? 1 : 0;
+        my $rc_q = $ovl->{$p[$i]."_rc"} ? 1 : 0;
+
         my $frg = $frg{$id}->new;
-        $frg->reverse_complement if $rc_q;
-        my $suf = $frg->substr_seq(@$o);
-        $ctg .= $rc ? $suf->reverse_complement : $suf;
+        my $ohl = $ovl->{$p[$i]};
+
+        print STDERR "$rc_r $rc_o $rc_q [@$ohl]\n";         
+
+        if($rc_r xor $rc_q){
+            print STDERR "-- ohl->rc --\n";
+            @$ohl = @$ohl == 2 ? ($ohl->[1] * -1) : (0, $ohl->[0] * -1)
+        }
+
+        if($rc_r){
+            print STDERR "-- frg->rc --\n";
+            $frg->reverse_complement;
+        }
+
+        $rc_pr = $rc_r;
+        $rc_po = $rc_o;
+        
+        $off+= abs($_) for @$ohl;
+        print " " x abs($off), $frg->seq, "\n";
+        my $suf = $frg->substr_seq($ohl);
+
+        print STDERR " " x length($ctg->seq), $suf->seq,"\n";
+        $ctg .= $suf;
     }
 
     my $ctg_rc = $ctg->new;
     $ctg_rc->reverse_complement;
+
+    print $ctg->seq,"\n";
+    print "\n";
+    my $ctg_seq = $ctg->seq lt $ctg_rc->seq ? $ctg->seq : $ctg_rc->seq;
+    print $ctg_seq,"\n";
     
-    print $ctg->seq lt $ctg_rc->seq ? $ctg->seq : $ctg_rc->seq,"\n";
+    # ref
+    while (my ($k, $v) = each %ref){ 
+        my $vr = $v->new->reverse_complement;
+        my $ref_seq = $v->seq lt $vr->seq ? $v->seq : $vr->seq;
+        my @ctg_seq = split(//, $ctg_seq);
+        my @ref_seq = split(//, $ref_seq);
+        for(my $i=0; $i<@ctg_seq; $i++){
+            print $ctg_seq[$i] eq $ref_seq[$i] ? "|" : " ";
+        }
+        print "\n", $ref_seq,"\n";
+        print "\n", $ref_seq eq $ctg_seq ? "[ Yeah! ]" : "[ D'oh! ]", "\n"
+    }
+
     my $offset = 0;
     # for(sort keys %frg){
     #     print " " x $offset, $frg{$_}->seq,"\n";
