@@ -18,6 +18,7 @@ use Graph;
 use Data::Dumper;
 $Data::Dumper::Sortkeys = 1;
 use Fasta::Parser;
+use Fastq::Parser;
 use Sam::Parser;
 use Sam::Alignment ':flags';
 
@@ -114,7 +115,14 @@ my $blog = "$opt{dir}/$opt{out}.log";
 my $frg = $opt{frg};
 
 my $sam_cmd;
-    
+
+# load fragments
+#  early to check ids etc..
+$L->info("Loading fragments");
+
+my %frg = read_frg($opt{frg});
+my %ref = read_frg($opt{ref}) if $opt{ref};
+
 # index chunk
 $L->debug("Indexing fragments");
 my $bwa_index_cmd = $opt{bwa_path}."bwa index $frg $frg 2>$frg.idx.log";
@@ -393,9 +401,12 @@ sub check_binary{
 
 sub read_frg{
     my $file = shift;
-    my $fp = Fasta::Parser->new(file => $file);
+    my $fp = Fasta::Parser->new(file => $file)->check_format;
+    $fp = Fastq::Parser->new(file => $file)->check_format unless $fp;
+    $L->logdie("Input neither FASTA nor FASTQ\n ($file)") unless $fp;
+
     my %frg;
-    while(my $fa = $fp->next_seq){
+    while (my $fa = $fp->next_seq) {
         die "non-unique ID: ".($fa->id)."\n" if exists $frg{$fa->id};
         $frg{$fa->id} = $fa;
     }
