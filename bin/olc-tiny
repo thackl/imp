@@ -287,57 +287,57 @@ while ($G->has_vertices) {
         my $frg = $frg{$id}->new;
         my $ohl = $ovl->{$p[$i]};
 
-        print STDERR "$rc_r $rc_o $rc_q [@$ohl]\n";         
+        $L->debug("$rc_r $rc_o $rc_q [@$ohl]");
 
-        if($rc_r xor $rc_q){
-            print STDERR "-- ohl->rc --\n";
+        if ($rc_r xor $rc_q) {
+            $L->debug("ohl->rc");
             @$ohl = @$ohl == 2 ? ($ohl->[1] * -1) : (0, $ohl->[0] * -1)
         }
 
-        if($rc_r){
-            print STDERR "-- frg->rc --\n";
+        if ($rc_r) {
+            $L->debug("frg->rc");
             $frg->reverse_complement;
         }
 
         $rc_pr = $rc_r;
         $rc_po = $rc_o;
-        
+
         $off+= abs($_) for @$ohl;
-        print " " x abs($off), $frg->seq, "\n";
+        $L->debug(" " x abs($off), $frg->seq);
         my $suf = $frg->substr_seq($ohl);
 
-        print STDERR " " x length($ctg->seq), $suf->seq,"\n";
+        $L->debug(" " x length($ctg->seq), $suf->seq);
         $ctg .= $suf;
     }
 
-    my $ctg_rc = $ctg->new;
-    $ctg_rc->reverse_complement;
+    $L->debug("[$pc/".@ccs."] ".(@p/2)." fragments, ".length($ctg->seq)." bp");
 
-    print $ctg->seq,"\n";
-    print "\n";
-    my $ctg_seq = $ctg->seq lt $ctg_rc->seq ? $ctg->seq : $ctg_rc->seq;
-    print $ctg_seq,"\n";
-    
-    # ref
-    while (my ($k, $v) = each %ref){ 
-        my $vr = $v->new->reverse_complement;
-        my $ref_seq = $v->seq lt $vr->seq ? $v->seq : $vr->seq;
-        my @ctg_seq = split(//, $ctg_seq);
-        my @ref_seq = split(//, $ref_seq);
-        for(my $i=0; $i<@ctg_seq; $i++){
-            print $ctg_seq[$i] eq $ref_seq[$i] ? "|" : " ";
-        }
-        print "\n", $ref_seq,"\n";
-        print "\n", $ref_seq eq $ctg_seq ? "[ Yeah! ]" : "[ D'oh! ]", "\n"
-    }
+    print $ctg;
 
-    my $offset = 0;
-    # for(sort keys %frg){
-    #     print " " x $offset, $frg{$_}->seq,"\n";
-    #     $offset+=42;
+    # my $ctg_rc = $ctg->new;
+    # $ctg_rc->reverse_complement;
+
+    # print $ctg->seq,"\n";
+    # print "\n";
+    # my $ctg_seq = $ctg->seq lt $ctg_rc->seq ? $ctg->seq : $ctg_rc->seq;
+    # print $ctg_seq,"\n";
+
+    # if ($opt{ref}) {
+    #     # ref
+    #     while (my ($k, $v) = each %ref) {
+    #         my $vr = $v->new->reverse_complement;
+    #         my $ref_seq = $v->seq lt $vr->seq ? $v->seq : $vr->seq;
+    #         my @ctg_seq = split(//, $ctg_seq);
+    #         my @ref_seq = split(//, $ref_seq);
+    #         for (my $i=0; $i<@ctg_seq; $i++) {
+    #             print $ctg_seq[$i] eq $ref_seq[$i] ? "|" : " ";
+    #         }
+    #         print "\n", $ref_seq,"\n";
+    #         print "\n", $ref_seq eq $ctg_seq ? "[ Yeah! ]" : "[ D'oh! ]", "\n"
+    #     }
     # }
-    $G->delete_vertices(@p);
 
+    $G->delete_vertices(@p);
 }
 
 
