@@ -1,0 +1,3 @@
+[submodule "util/bwa"]
+	path = util/bwa
+	url = https://github.com/BioInf-Wuerzburg/bwa.git
