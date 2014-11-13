@@ -167,11 +167,22 @@ while (my %h = $sp->next_header_line('SQ')) {
     $l{$h{SN}} = $h{LN};
 }
 
+my $contained;
+my $qid_prev = '';
+
 while (my $a = $sp->next_aln) {
+
     my ($rid,$qid) = ($a->rname, $a->qname);
     # ignore self hit
     next if $rid eq $qid;
 
+    if($qid ne $qid_prev){ # new query
+        $qid_prev = $qid;
+        $contained = 0;
+    }else{
+        next if $contained;
+    }
+    
     my($qprel, $qsufl) = (0,0);
     # query
     my ($o,$t) = $a->cigar =~ /^(\d+)(\w)/;
@@ -182,21 +193,25 @@ while (my $a = $sp->next_aln) {
     my ($q5,$q3,$r5,$r3);
 
     # are alignment borders terminal?
-    $q5 = $r3 = $qprel < $opt{term_ignore_length};
-    $q3 = $r5 = $qsufl < $opt{term_ignore_length};
+    $q5 = $r3 = $qprel < $opt{term_ignore_length} || 0;
+    $q3 = $r5 = $qsufl < $opt{term_ignore_length} || 0;
 
-    # ignore contained and non-termianal
-    next if ! ($q5 xor $q3);
+    # my %type = ( "00" => "int", "01" => "5'p", "10" => "3'p", "11" => "con");
+    # print OVL join("\t", $qid, $rid, scalar $a->opt('AS'), $a->cigar, $type{$q5.$q3}, $qprel, $qsufl, $a->is(REVERSE_COMPLEMENT) ? "r" : "f"),"\n";
+
+    if($q5 && $q3){
+        $contained = 1;
+        next;
+    }
+    
+    next unless ($q5 xor $q3);
 
     if ($a->is(REVERSE_COMPLEMENT)) {
-        #print "rc\n";
         ($q5,$q3) = ($q3,$q5)
     }
 
     my $r = $rid.( $r5 ? "'5" : "'3" );
     my $q = $qid.( $q5 ? "'5" : "'3" );
-
-    #print "$r $q \n",substr($a, 0,30),"\t";
 
     my $inferior = 0;
 
@@ -204,7 +219,9 @@ while (my $a = $sp->next_aln) {
     foreach ($q,$r) {
         if (my ($e) = $G->edges_at($_)) {
             my $score = $G->get_edge_attribute(@$e, "ovl")->{score};
+            $L->debug("S: $score ".$a->opt('AS'));
             if ($score < scalar $a->opt('AS')) {
+                $L->debug("deleting inferior edge");
                 $G->delete_vertices(@$e); # delete inferior ovl
             } else {
                 $inferior++;
