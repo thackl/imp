@@ -249,9 +249,16 @@ print Dumper({isolates => \@isolates}) if @isolates;
 
 # nodes degree>2 (shouldn't happen)
 
-# circles
-my @cycle = $G->find_a_cycle;
-print Dumper({cycles => \@cycle}) if @cycle;
+# pop cycles
+while (my @cycle = $G->find_a_cycle) {
+    my ($e1, $e2) = $G->edges_at($cycle[0]);
+    # find the non-interfragment edge
+    my @e = substr($e1->[0],0,-1) eq substr($e1->[1],0,-1) ? @$e2 : @$e1;
+    $L->debug("popping cycle, deleting edge @e");
+
+    $G->delete_edge(@e);
+}
+
 
 my @ccs = $G->connected_components();
 $L->info("Synthesizing ".@ccs." backbone paths ");
@@ -360,6 +367,45 @@ sub extend_ctg{
     return $ctg;
 }
 
+sub random_path{
+    my $G = shift;
+    my $vr = $G->random_vertex;
+
+    my @path = ($vr);
+    my @cv = $G->successors($vr);
+    my $l = $G->all_reachable($vr) + 1;
+
+    foreach (@cv) {             # one or two directions
+        @path = reverse @path;  # second dir in other dir
+        my $cv = $_;            # current
+        push @path, $cv;
+
+        my $pv = $vr;           # prev
+        while (my $nv = next_vertex($G, $cv, $pv)) {
+            push @path, $nv;
+            $pv = $cv;
+            $cv = $nv;
+
+            die "inf loop" if @path > $l;
+        }
+    }
+
+    #    print Dumper($vr, \@cv, [@path]);
+    return @path;
+}
+
+sub next_vertex{
+    my ($G, $cv, $pv) = @_;
+    my @s = $G->successors($cv);
+    if (@s < 2) {
+        # no successor but previous
+        return undef;
+    } elsif (@s > 2) {
+        die "junction (degree: ".@s.") at $cv\n";
+    }
+
+    return $s[0] eq $pv ? $s[1] : $s[0];
+}
 
 ##----------------------------------------------------------------------------##
 # supplementary
