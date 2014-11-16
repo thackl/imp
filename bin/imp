@@ -81,6 +81,7 @@ GetOptions(                     # use %opt (Cfg) as defaults
                         help|h!
                         quiet!
                         debug|D!
+                        sif
                    )
           ) or $L->logcroak('Failed to "GetOptions"');
 
@@ -167,8 +168,11 @@ while (my %h = $sp->next_header_line('SQ')) {
     $l{$h{SN}} = $h{LN};
 }
 
+my %sif;
+
 my $contained;
 my $qid_prev = '';
+
 
 while (my $a = $sp->next_aln) {
 
@@ -182,7 +186,7 @@ while (my $a = $sp->next_aln) {
     }else{
         next if $contained;
     }
-    
+
     my($qprel, $qsufl) = (0,0);
     # query
     my ($o,$t) = $a->cigar =~ /^(\d+)(\w)/;
@@ -203,7 +207,7 @@ while (my $a = $sp->next_aln) {
         $contained = 1;
         next;
     }
-    
+
     next unless ($q5 xor $q3);
 
     if ($a->is(REVERSE_COMPLEMENT)) {
@@ -223,7 +227,11 @@ while (my $a = $sp->next_aln) {
             if ($score < scalar $a->opt('AS')) {
                 $L->debug("deleting inferior edge");
                 $G->delete_vertices(@$e); # delete inferior ovl
+                my ($v1, $v2) = @$e;
+                $sif{$v1 lt $v2 ? "$v1 $v2" : "$v2 $v1"} = 'deleted' if $opt{sif};
+
             } else {
+                $sif{$q lt $r ? "$q $r" : "$r $q"} = 'inferior'  if $opt{sif};;
                 $inferior++;
             }
         }
@@ -256,8 +264,9 @@ while (my $a = $sp->next_aln) {
                                 $q => \@qo,
                                 $r => \@ro,
                                });
+
+        $sif{$q lt $r ? "$q $r" : "$r $q"} = 'inter' if $opt{sif};
     }
-    #print "$G\n";
 }
 
 # isolates (shouldn't happen)
@@ -270,6 +279,18 @@ foreach my $v ($G->vertices) {
     my $u = $v;
     $v = substr($u, 0, -1).(substr($u, -1) == 3 ? 5 : 3);
     $G->add_edges($u,$v);
+    $sif{$u lt $v ? "$u $v" : "$v $u"} = 'intra' if $opt{sif};
+
+    # refine
+    foreach ($u,$v){
+        if($G->degree($_) < 2){ # terminal node
+            # try to connect using inf.bam
+            $sif{$u lt $v ? "$u $v" : "$v $u"} = 'refined' if $opt{sif};
+
+            # store to seed path reconstructions (better than rand)
+
+        }
+    }
 }
 
 $L->debug(Dumper($G->connected_components));
@@ -377,6 +398,14 @@ while ($G->has_vertices) {
     $G->delete_vertices(@p);
 }
 
+if($opt{sif}){
+    open(SIF, '>$opt{sif}') or die "$! g.sif";
+    while(my($v,$e) = each %sif){
+        my ($v1,$v2) = split(" ", $v);
+        print SIF "$v1 $e $v2\n";
+    }
+    close SIF;
+}
 
 
 ##----------------------------------------------------------------------------##
