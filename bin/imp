@@ -138,20 +138,27 @@ my %frg = read_frg($frg);
 
 
 ##----------------------------------------------------------------------------##
+# index chunk
+$L->info("Indexing fragments");
+
 # get overlaps
 my $sam_cmd;
 
-# index chunk
-$L->info("Indexing fragments");
 my $bwa_index_cmd = $opt{bwa_path}."bwa index $frg $frg 2>$frg.idx.log";
 $L->debug($bwa_index_cmd);
 qx($bwa_index_cmd);
 $L->logdie("bwa failed: $?\n", do { local $/; local @ARGV = ("$frg.idx.log") ; <> }) if $?;
 
-$sam_cmd = $opt{bwa_path}."bwa mem -e -t $opt{threads} @{$opt{bwa_opt}} $frg $frg 2>$frg.bwa.log";
 
+##----------------------------------------------------------------------------##
+# map & construct graph
 $L->info("Constructing graph");
 
+my $bam = "$tmp/inf.bam";
+open(BAM, "| samtools view -b /dev/fd/0 > $bam") or die "$!";
+
+
+$sam_cmd = $opt{bwa_path}."bwa mem -e -t $opt{threads} @{$opt{bwa_opt}} $frg $frg 2>$frg.bwa.log";
 $L->debug($sam_cmd);
 open(my $sam_oh, "-|", $sam_cmd) or $L->logdie($!);
 
@@ -166,6 +173,7 @@ my $G = Graph->new(
 # Store seq lengths
 while (my %h = $sp->next_header_line('SQ')) {
     $l{$h{SN}} = $h{LN};
+    print BAM $h{raw};
 }
 
 my %sif;
@@ -219,6 +227,8 @@ while (my $a = $sp->next_aln) {
 
     my $inferior = 0;
 
+    print BAM $a;
+
     # add edge if better (score) than previous edges
     foreach ($q,$r) {
         if (my ($e) = $G->edges_at($_)) {
@@ -269,6 +279,13 @@ while (my $a = $sp->next_aln) {
     }
 }
 
+close BAM;
+
+
+##----------------------------------------------------------------------------##
+# refine graph
+$L->info("Refining graph");
+
 # isolates (shouldn't happen)
 my @isolates = $G->isolated_vertices();
 print Dumper({isolates => \@isolates}) if @isolates;
@@ -293,11 +310,11 @@ foreach my $v ($G->vertices) {
     }
 }
 
-$L->debug(Dumper($G->connected_components));
-#print Dumper($G);
-#print "$G\n";
 
-$L->info("Cleaning graph");
+
+##----------------------------------------------------------------------------##
+# clean graph
+$L->info("Popping cycles");
 
 # nodes degree>2 (shouldn't happen)
 
@@ -311,6 +328,9 @@ while (my @cycle = $G->find_a_cycle) {
     $G->delete_edge(@e);
 }
 
+
+##----------------------------------------------------------------------------##
+# synthesis backbone
 my @ccs = $G->connected_components();
 $L->info("Synthesizing ".@ccs." backbone paths ");
 
@@ -371,30 +391,6 @@ while ($G->has_vertices) {
     $L->debug("[$pc/".@ccs."] ".(@p/2)." fragments, ".length($ctg->seq)." bp");
 
     print $ctg;
-
-    # my $ctg_rc = $ctg->new;
-    # $ctg_rc->reverse_complement;
-
-    # print $ctg->seq,"\n";
-    # print "\n";
-    # my $ctg_seq = $ctg->seq lt $ctg_rc->seq ? $ctg->seq : $ctg_rc->seq;
-    # print $ctg_seq,"\n";
-
-    # if ($opt{ref}) {
-    #     # ref
-    #     while (my ($k, $v) = each %ref) {
-    #         my $vr = $v->new->reverse_complement;
-    #         my $ref_seq = $v->seq lt $vr->seq ? $v->seq : $vr->seq;
-    #         my @ctg_seq = split(//, $ctg_seq);
-    #         my @ref_seq = split(//, $ref_seq);
-    #         for (my $i=0; $i<@ctg_seq; $i++) {
-    #             print $ctg_seq[$i] eq $ref_seq[$i] ? "|" : " ";
-    #         }
-    #         print "\n", $ref_seq,"\n";
-    #         print "\n", $ref_seq eq $ctg_seq ? "[ Yeah! ]" : "[ D'oh! ]", "\n"
-    #     }
-    # }
-
     $G->delete_vertices(@p);
 }
 
@@ -408,23 +404,8 @@ if($opt{sif}){
 }
 
 
+
 ##----------------------------------------------------------------------------##
-# merge_seqs
-sub extend_ctg{
-    my ($ctg, $seq, $ovl) = @_;
-    # my @o = @$ovl;
-    # if($o[qName] eq $seq->id){ # ctg ~= target
-
-    # }elsif($o[tName] eq $seq->id){ # ctg ~= query
-    #     my $off = $o[qLength] - $o[qEnd];
-    #     $ctg.= $seq->substr_seq($o[tEnd]+$off);
-    # }else{
-    #     die "overlap ids @o[0..1] don't match sequence id $seq->{id}";
-    # }
-
-
-    return $ctg;
-}
 
 sub random_path{
     my $G = shift;
@@ -526,4 +507,3 @@ sub read_frg{
     }
     return %frg;
 }
-
