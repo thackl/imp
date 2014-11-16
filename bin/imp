@@ -76,6 +76,7 @@ GetOptions(                     # use %opt (Cfg) as defaults
                         frg|fragments=s
                         ref|reference=s
                         samtools-path=s
+                        keep|keep-temporary-files!
                         version|V!
                         help|h!
                         quiet!
@@ -110,8 +111,7 @@ check_binary(bin('bwa'));
 my $tmp = tempdir(
                   "imp-XXXXXX",
                   DIR => $opt{tmp},
-                  UNLINK => 1,
-                  CLEANUP => 1
+                  CLEANUP => $opt{keep} ? 0 : 1,
                  );
 
 ##----------------------------------------------------------------------------##
