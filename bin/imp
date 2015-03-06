@@ -26,7 +26,7 @@ use Sam::Alignment ':flags';
 ##---------------------------------------------------------------------------##
 # Globals
 
-our $VERSION = "0.2.1";
+our $VERSION = "0.3.0";
 
 our $ID = 'imp';
 
@@ -60,12 +60,14 @@ my %opt = (
            samtools_path => '',
            bwa_path => $RealBin.'/../util/bwa/',
            threads => 1,
-           term_ignore_length => 20,
-           bwa_opt => [qw(-a -D0 -y10 -r 1 -T 70 -W40 -L0,0)],
+           term_ignore_length => 5,
+           bwa_opt => [qw(-a -D0 -y10 -r 1 -T 30 -W40 -L0,0)],
 #           bwa_opt => [qw(-a -D0 -e -T 0 -W40 -L0,0)],
            dir => '.',
            out => $ID,
            tmp => (-d '/dev/shm' ? '/dev/shm' : '/tmp'),
+           min_score => 0,
+           max_trans_depth => 20,
           );
 
 GetOptions(                     # use %opt (Cfg) as defaults
@@ -81,7 +83,7 @@ GetOptions(                     # use %opt (Cfg) as defaults
                         help|h!
                         quiet!
                         debug|D!
-                        sif
+                        sif=s
                    )
           ) or $L->logcroak('Failed to "GetOptions"');
 
@@ -100,7 +102,7 @@ if ($opt{version}) {
 $opt{quiet} && $L->level($WARN);
 $opt{debug} && $L->level($DEBUG);
 
-$L->info("Checking binaries");
+$L->info("Checking tools");
 
 check_binary(bin('samtools'), ["--version", "1.1"]);
 check_binary(bin('bwa'));
@@ -121,13 +123,13 @@ my $tmp = tempdir(
 
 my $frg = "$tmp/frg.faq";
 unless($opt{frg}){
-    $L->info("Loading fragments from STDIN");
+    $L->info("Loading fridge < STDIN");
     my $c;
     open(FRG, '>', $frg) or die "$! $opt{frg}";
     print FRG $c while read(STDIN, $c, 100000);
     close FRG;
 }else{
-    $L->info("Loading fragments");
+    $L->info("Loading fridge < $opt{frg}");
     $opt{frg} = File::Spec->rel2abs($opt{frg});
     qx(ln -s $opt{frg} $frg);
 }
@@ -139,7 +141,7 @@ my %frg = read_frg($frg);
 
 ##----------------------------------------------------------------------------##
 # index chunk
-$L->info("Indexing fragments");
+$L->info("Indexing ingredients");
 
 # get overlaps
 my $sam_cmd;
@@ -152,7 +154,7 @@ $L->logdie("bwa failed: $?\n", do { local $/; local @ARGV = ("$frg.idx.log") ; <
 
 ##----------------------------------------------------------------------------##
 # map & construct graph
-$L->info("Constructing graph");
+$L->info("Processing recipe");
 
 my $bam = "$tmp/inf.bam";
 open(BAM, "| samtools view -b /dev/fd/0 > $bam") or die "$!";
@@ -167,8 +169,9 @@ my $sp = Sam::Parser->new(fh => $sam_oh);
 
 my %l;
 my $G = Graph->new(
-                   undirected => 1,
+                   directed => 0,
                   );
+
 
 # Store seq lengths
 while (my %h = $sp->next_header_line('SQ')) {
@@ -180,20 +183,28 @@ my %sif;
 
 my $contained;
 my $qid_prev = '';
-
+my %contained;
 
 while (my $a = $sp->next_aln) {
 
-    my ($rid,$qid) = ($a->rname, $a->qname);
-    # ignore self hit
-    next if $rid eq $qid;
+    print BAM $a;
 
+    my ($rid,$qid) = ($a->rname, $a->qname);
+
+    # ignore self hit
+    next if $qid eq $rid;
+
+    # short-cut if contained
     if($qid ne $qid_prev){ # new query
         $qid_prev = $qid;
         $contained = 0;
     }else{
         next if $contained;
     }
+
+    my $score = scalar $a->opt('AS');
+    next unless $opt{min_score} < $score;
+
 
     my($qprel, $qsufl) = (0,0);
     # query
@@ -211,140 +222,191 @@ while (my $a = $sp->next_aln) {
     # my %type = ( "00" => "int", "01" => "5'p", "10" => "3'p", "11" => "con");
     # print OVL join("\t", $qid, $rid, scalar $a->opt('AS'), $a->cigar, $type{$q5.$q3}, $qprel, $qsufl, $a->is(REVERSE_COMPLEMENT) ? "r" : "f"),"\n";
 
+    # contained
     if($q5 && $q3){
         $contained = 1;
+        $contained{$qid} = 1;
+        $G->set_edge_attribute($rid, $qid , "ovl", {
+                                                    score => scalar $a->opt('AS'),
+                                                    idy => undef, # nyi
+                                                    len => undef, # nyi
+                                                    adir => "=",
+                                                    bdir => ':',
+                                                    aoff => [''],
+                                                    boff => [''],
+                                                   });
         next;
     }
 
+    # ignore $qid<$rid representation
+    next if $qid le $rid;
+
+    # non-terminal alignment
     next unless ($q5 xor $q3);
 
     if ($a->is(REVERSE_COMPLEMENT)) {
         ($q5,$q3) = ($q3,$q5)
     }
 
-    my $r = $rid.( $r5 ? "'5" : "'3" );
-    my $q = $qid.( $q5 ? "'5" : "'3" );
+    my %ovl = (
+               score => scalar $a->opt('AS'),
+               idy => undef, # nyi
+               len => undef, # nyi
+               adir => $r5 ? '<' : '>',
+               bdir => $q5 ? '<' : '>',
+               boff => [$r3 ? (-$qsufl) : (0, $qprel)],
+              );
 
-    my $inferior = 0;
-
-    print BAM $a;
-
-    # add edge if better (score) than previous edges
-    foreach ($q,$r) {
-        if (my ($e) = $G->edges_at($_)) {
-            my $score = $G->get_edge_attribute(@$e, "ovl")->{score};
-            $L->debug("S: $score ".$a->opt('AS'));
-            if ($score < scalar $a->opt('AS')) {
-                $L->debug("deleting inferior edge");
-                $G->delete_vertices(@$e); # delete inferior ovl
-                my ($v1, $v2) = @$e;
-                $sif{$v1 lt $v2 ? "$v1 $v2" : "$v2 $v1"} = 'deleted' if $opt{sif};
-
-            } else {
-                $sif{$q lt $r ? "$q $r" : "$r $q"} = 'inferior'  if $opt{sif};;
-                $inferior++;
-            }
+    if ($r5) {
+        # extremely ugly
+        # TODO: make bwa return aln length or sufl length of ref as opt
+        my $ovll;
+        my $cigar = $a->cigar;
+        while ($cigar =~ /(\d+)[MD]/g) {
+            $ovll += $1;
         }
+        ;
+
+        $ovl{aoff} = [(-($l{$rid} - ($a->pos-1) - $ovll))];
+    } else {
+        $ovl{aoff} = [(0, $a->pos-1)];
     }
 
-    if (! $inferior) {
-        my @ro;
-        if ($r5) {
-            # extremely ugly
-            # TODO: make bwa return aln length or sufl length of ref as opt
-            my $ovll;
-            my $cigar = $a->cigar;
-            while ($cigar =~ /(\d+)[MD]/g) {
-                $ovll += $1;
-            }
-            ;
+    $G->set_edge_attribute($rid, $qid , "ovl", \%ovl);
 
-            @ro = (-($l{$rid} - ($a->pos-1) - $ovll));
-        } else {
-            @ro = (0, $a->pos-1);
-        }
-
-        my @qo = $r3 ? (-$qsufl) : (0, $qprel);
-
-        $G->set_edge_attribute($q, $r, "ovl",
-                               {
-                                score => scalar $a->opt('AS'),
-                                rc => $a->is(REVERSE_COMPLEMENT),
-                                $q."_rc" => $a->is(REVERSE_COMPLEMENT),
-                                $q => \@qo,
-                                $r => \@ro,
-                               });
-
-        $sif{$q lt $r ? "$q $r" : "$r $q"} = 'inter' if $opt{sif};
-    }
 }
 
 close BAM;
 
+my $bam_sorted = "$tmp/inf.sorted";
+qx(samtools sort $bam $bam_sorted);
+$L->logdie("samtools sort failed: $?\n") if $?;
+$bam = $bam_sorted.'.bam';
+qx(samtools index $bam);
+$L->logdie("samtools index failed: $?\n") if $?;
 
 ##----------------------------------------------------------------------------##
 # refine graph
-$L->info("Refining graph");
+$L->info("Seasoning dishes");
 
 # isolates (shouldn't happen)
 my @isolates = $G->isolated_vertices();
-print Dumper({isolates => \@isolates}) if @isolates;
-die "isolates" if @isolates;
+print STDERR Dumper({isolates => \@isolates}) if @isolates;
 
-# add internal frg edges
-foreach my $v ($G->vertices) {
-    my $u = $v;
-    $v = substr($u, 0, -1).(substr($u, -1) == 3 ? 5 : 3);
-    $G->add_edges($u,$v);
-    $sif{$u lt $v ? "$u $v" : "$v $u"} = 'intra' if $opt{sif};
-
-    # refine
-    foreach ($u,$v){
-        if($G->degree($_) < 2){ # terminal node
-            # try to connect using inf.bam
-            $sif{$u lt $v ? "$u $v" : "$v $u"} = 'refined' if $opt{sif};
-
-            # store to seed path reconstructions (better than rand)
-
-        }
-    }
+foreach my $v (keys %contained) {
+    $G->delete_vertex($v);
 }
-
 
 
 ##----------------------------------------------------------------------------##
-# clean graph
-$L->info("Popping cycles");
-
-# nodes degree>2 (shouldn't happen)
-
 # pop cycles
-while (my @cycle = $G->find_a_cycle) {
-    my ($e1, $e2) = $G->edges_at($cycle[0]);
-    # find the non-interfragment edge
-    my @e = substr($e1->[0],0,-1) eq substr($e1->[1],0,-1) ? @$e2 : @$e1;
-    $L->debug("popping cycle, deleting edge @e");
+$L->info("Popping bubbles");
 
-    $G->delete_edge(@e);
+my @trans_edges;
+foreach my $e ($G->edges){
+    # at least
+    push @trans_edges, $e if transitive_edge_path($G, @$e);
 }
+
+foreach my $e (@trans_edges){
+    $G->delete_edge(@$e);
+    # tag trans edges for debug
+    # my $ovl = $G->get_edge_attribute(@$e , "ovl");
+    # $ovl->{adir} .= 'x';
+    # $ovl->{bdir} = 'x'.$ovl->{bdir};
+
+    # $G->set_edge_attribute(@$e, "ovl", $ovl);
+
+}
+
+
+# TODO: make this smarter by maybe removing/collapsing parallel edges - would
+# speed up longest path search
+
+# while (my @c = $G->find_a_cycle) {
+#     my @e;
+#     for(my $i=0; $i<@c; $i++){
+#         if(substr($c[$i],0,-1) ne substr($c[$i+1],0,-1)){
+#             @e = @c[$i, $i+1];
+#             last;
+#         }
+#     }
+
+#     Die "Impenetrable bubble!\n" unless @e;
+
+#     #$sif{$e[0] lt $e[1] ? "$e[0] $e[1]" : "$e[1] $e[0]"} = 'popped' if $opt{sif};
+
+#     $L->debug("popping @e");
+#     $G->delete_edge(@e);
+
+#     foreach my $v(@e){
+#         my $u = substr($v,-1) eq 5 ? substr($v,0,-1).'3' : substr($v,0,-1).'5';
+#         if($G->degree($u) == 1){
+#             $G->delete_vertices($v, $u);
+#             $L->debug("deleting singleton $v $u");
+#         }
+#     }
+# }
+
+
+##----------------------------------------------------------------------------##
+#
+
+#$L->info("Checking the hood");
+
+# remove singletons from graph
+my @ccs = sort{scalar @$a <=> scalar @$b}$G->connected_components();
+# not explicitly necessary, if just skipped during bbp search
+# while(@{$ccs[0]} < 3){
+#     $G->delete_vertices(@{$ccs[0]});
+#     shift @ccs; # pop singletons
+# };
 
 
 ##----------------------------------------------------------------------------##
 # synthesis backbone
-my @ccs = $G->connected_components();
-$L->info("Synthesizing ".@ccs." backbone paths ");
+$L->info("Going the extra mile");
+
+my @bbps; # backbone paths
+foreach my $cc (reverse @ccs){ # largest first
+    next unless @$cc > 1; # singletons
+
+    my $bbp = longest_path_at($G, $cc->[0], 1); # no need to unvisit - every cc
+                                                # is only traversed once
+#    my $bbp = [$G->longest_path];
+    push @bbps, $bbp;
+}
+
+# while(my @bbp = $G->longest_path){
+#     last if @bbp < 2;
+#     push @bbps, \@bbp;
+#     $G->delete_vertices($G->all_neighbours($bbp[0]));
+# }
+
+print STDERR Dumper(\@bbps);
+
+foreach my $bbp (@bbps){
+    for(my $i=0; $i<@$bbp-1;$i++){
+        my $ovl = $G->get_edge_attribute($bbp->[$i], $bbp->[$i+1], "ovl");
+        $ovl->{adir} .= 'B';
+        $ovl->{bdir} = 'B'.$ovl->{bdir};
+        $G->set_edge_attribute($bbp->[$i], $bbp->[$i+1], "ovl", $ovl);
+
+    }
+}
+
+$L->info("Synthesizing products (".@bbps.")");
+graph2sif($G, $opt{sif}) if $opt{sif};
+exit;
 
 my $pc = 0;
 
 # start from exterior nodes
-while ($G->has_vertices) {
+foreach (@bbps) {
+    my @p = @$_;
     $pc++;                      # path counter
-    my @p = random_path($G);
-
-    last unless @p;             # no more longest paths
-
-    my $id = substr($p[0], 0, -2);
-    my $rc_pr = substr($p[0],-1) eq 3 ? 1 : 0;
+    my $id;
+    my $rc_pr = 0;
     my $rc_po = 0;
 
     die "unknown $id\n", Dumper([keys %frg]) unless exists $frg{$id};
@@ -352,8 +414,10 @@ while ($G->has_vertices) {
     $ctg->reverse_complement if $rc_pr;
     #$L->debug($ctg->seq);
 
+    $L->debug(Dumper(\@p));
     my $off;
     for (my $i=2; $i<@p; $i+=2) {
+        $L->debug(Dumper([@p[($i-1)..($i+2)]]));
         my $id = substr($p[$i], 0, -2);
         my $rc_r = substr($p[$i],-1) eq 3 ? 1 : 0;
 
@@ -394,18 +458,151 @@ while ($G->has_vertices) {
     $G->delete_vertices(@p);
 }
 
-if($opt{sif}){
-    open(SIF, '>$opt{sif}') or die "$! g.sif";
-    while(my($v,$e) = each %sif){
-        my ($v1,$v2) = split(" ", $v);
-        print SIF "$v1 $e $v2\n";
-    }
-    close SIF;
-}
-
 
 
 ##----------------------------------------------------------------------------##
+
+=head2 edge_transitive_path
+
+=cut
+
+sub transitive_edge_path{
+    my ($G, $u, $v) = @_;
+
+    my @n = grep{$_ ne $v}($G->neighbours($u));
+    return unless @n;
+
+    my $x;
+    my $o1 = $G->get_edge_attribute($u, $v, "ovl");
+
+    foreach my $n (@n){
+        if(grep{$_ eq $v}($G->neighbours($n))){
+            my $o2 = $G->get_edge_attribute($u, $n, "ovl");
+            my $o3 = $G->get_edge_attribute($n, $v, "ovl");
+
+            # tau.out.g != tau'.out.g
+            my $tog2 = $n lt $u ? $o2->{adir} : $o2->{bdir};
+            my $tog3 = $n lt $v ? $o3->{adir} : $o3->{bdir};
+
+            # pi.out.f == tau.out.f
+            my $pof = $o1->{adir};
+            my $tof = $u lt $n ? $o2->{adir} : $o2->{bdir};
+
+
+            # pi.out.h == tau'.out.h
+            my $poh = $o1->{bdir};
+            my $toh = $v lt $n ? $o3->{adir} : $o3->{bdir};
+
+            #print Dumper(["$u, $n, $v", $o1, $o2, $o3, "$tog2 == $tog3", "$pof != $tof","$poh != $toh" ]);
+
+            next if $tog2 eq $tog3;
+            next if $pof ne $tof;
+            next if $poh ne $toh;
+
+            $x = $n;
+            last;
+        }
+    }
+    return $x ? ($u, $x, $v) : undef;
+}
+
+=head2 alternative_path
+
+Breadth first search.
+
+=cut
+
+sub alternative_path{
+    my ($G, $u, $v, $max_dist) = @_;
+    return unless $G->has_edge($u, $v);
+    return unless $G->degree($u) > 1 && $G->degree($v) > 1;
+    $G->set_vertex_attribute($u, "visited", 1);
+
+    # set up initial queue
+    my @Q = grep{$_ ne $v}($G->neighbours($u));
+    $G->set_vertex_attribute($_, "visited", 1) for @Q;
+    my @Qcache;
+#    $G->set_edge_attribute($u, $_, "visited", 1) for @Q;
+
+    my $re;
+    while(@Q){
+        my @unvisited =  grep{
+            ! $G->get_vertex_attribute($_, "visited")
+        }($G->neighbours($Q[0]));
+        print STDERR Dumper(\@Q);
+
+        if (@unvisited) {
+            if (grep{$_ eq $v}(@unvisited)) {
+                $re = 1;
+                last;
+            }            ;
+            last unless $max_dist--;
+
+            $G->set_vertex_attribute($_, "visited", 1) for @unvisited;
+            push @Q, @unvisited;
+        }
+
+        push @Qcache, shift @Q;
+    }
+
+    # unvisit to allow recomputation
+    $G->set_vertex_attribute($_, "visited", 0) for ($u, $v, @Qcache);
+
+    return $re;
+}
+
+=head2 longest_path_at
+
+Compute the longest path in the connected component holding $v. The resulting
+does not necessarily include $v.
+
+  my $lp = longest_path_at($g,$v);
+
+=cut
+
+sub longest_path_at{
+    my ($G,$v) = @_;
+    my $p1 = longest_path_from($G, $v);
+    return longest_path_from($G, $p1->[0]);
+}
+
+=head2 longest_path_from
+
+Compute the longest path starting given vertex $v. $v will be the last element
+of the path, the first element is farthest away.
+
+  my $v_to_furthest = longest_path_from($g,$v);
+  my $furthest = $v_to_furthest->[0];
+
+=cut
+
+sub longest_path_from{
+    my ($G,$v,$deep) = @_;
+
+    $G->set_vertex_attribute($v, "visited", 1);
+
+
+    my $unvisited = [ grep{
+        ! $G->get_vertex_attribute($_, "visited")
+    }($G->successors($v)) ];
+
+    return [$v] if @$unvisited < 1;
+
+    my $longest_path = [];
+
+    foreach my $u (@$unvisited){
+        my $path = longest_path_from($G, $u, 1); # deep node
+        $longest_path = $path if @$path > @$longest_path;
+    }
+
+    push @$longest_path, $v;
+
+    if(! $deep){ # unvisit to allow recomputation
+        $G->set_vertex_attribute($_, "visited", 0) for $G->vertices;
+    }
+
+    return $longest_path;
+}
 
 sub random_path{
     my $G = shift;
@@ -506,4 +703,30 @@ sub read_frg{
         $frg{$fa->id} = $fa;
     }
     return %frg;
+}
+
+=head2 graph2sif
+
+print .sif representation of graph for Cytoscape
+
+=cut
+
+sub graph2sif{
+    my ($g, $sif) = @_;
+
+    $L->info("Dumping sif ($sif)");
+    open(SIF, ">$sif") or die "$!: $sif";
+    foreach($g->edges){
+        my ($v1,$v2) = @$_;
+        my %ovl = %{$g->get_edge_attribute($v1, $v2, "ovl")};
+        my $edge = sprintf("%s-[%s]-%s-[%s]-%s",
+            $ovl{adir},
+            join(",", @{$ovl{aoff}}),
+            $ovl{score},
+            join(",", @{$ovl{boff}}),
+            $ovl{bdir});
+
+        print SIF "$v1 $edge $v2\n";
+    }
+    close SIF;
 }
